@@ -1,54 +1,42 @@
-// Claude Code CLI provider. Facts below are cited against code.claude.com/docs/en/authentication
-// (fetched during design) — everything else is marked as an assumption to verify against a
-// real installed `claude` on the machine that actually runs this.
+// Claude Code CLI provider.
 //
-// VERIFIED:
-//   - There is no standalone `claude login` shell subcommand. Login happens by running
-//     `claude` interactively (first launch auto-prompts, or use the in-REPL `/login`), or via
-//     `claude setup-token` for a scriptable, subscription-bound long-lived token.
-//   - `claude setup-token` "opens the same browser authorization flow as /login, and the
-//     token prints to the terminal after you approve access in the browser" — no browser
-//     redirect page is FleetView's; the terminal-side of this is what we can spawn+capture.
-//   - Credentials on Linux live at `~/.claude/.credentials.json` (mode 0600), Windows at
-//     `%USERPROFILE%\.claude\.credentials.json`, overridable via `CLAUDE_CONFIG_DIR`. On
-//     macOS they're in the encrypted Keychain, not a plain file — no cheap file-existence
-//     check exists there, so `authenticated` is reported as `null` (unknown) on macOS rather
-//     than guessed.
+// VERIFIED against code.claude.com/docs/en/authentication (fetched during design):
+//   - There is no standalone `claude login` shell subcommand at the bare top level. Login
+//     happens by running `claude` interactively (first launch auto-prompts, or the in-REPL
+//     `/login`), or via `claude setup-token` for a scriptable, subscription-bound long-lived
+//     token (still used by triggerLogin() below — see its own comment).
 //   - "Subscription OAuth credentials from /login" are used automatically in headless `-p`
 //     mode too when no higher-priority credential (API key, CLAUDE_CODE_OAUTH_TOKEN, etc.) is
 //     set — so once you're logged in via the interactive CLI or VS Code extension, headless
 //     dispatch here needs nothing extra.
 //
-// VERIFIED against a real install (2026-08-14, `claude -p --help` pasted back from a real
-// machine, Claude Code CLI's own output):
-//   - `-p`/`--print` is real and works exactly as assumed.
-//   - `--permission-mode <mode>` accepts `acceptEdits | bypassPermissions | default | dontAsk
-//     | plan | auto`. Found the hard way, same as codex.js's sandbox bug: a first real
-//     dispatch ran cleanly and even reported "Finished" — but its own final message said it
-//     needed approval to create the file and hadn't gotten it, because headless dispatch has
-//     no one there to click "allow". dispatch() below now passes `--permission-mode
-//     bypassPermissions` explicitly. (There's also a blunter top-level
-//     `--dangerously-skip-permissions` flag, documented as "recommended only for sandboxes
-//     with no internet access" — deliberately not used here in favor of the permission-mode
-//     value that doesn't carry that caveat.)
-//   - There's a top-level `auth` subcommand ("Manage authentication") this file doesn't use
-//     yet — worth investigating as a possible fix for the macOS "authenticated: null" gap
-//     above (`claude auth status` or similar might give a cheap real signal instead of
-//     "unknown") — not yet tested, noted here rather than guessed at.
+// VERIFIED against a real install (2026-08-14, real `--help`/output pasted back from Laura's
+// machine, Claude Code CLI):
+//   - `-p`/`--print` works as assumed for headless dispatch.
+//   - `--permission-mode <mode>` (`acceptEdits | bypassPermissions | default | dontAsk | plan
+//     | auto`) exists. Found the hard way: a first real dispatch ran cleanly and reported
+//     "Finished" — but its own final message said it needed approval to write and had no one
+//     to ask, since headless dispatch has no interactive prompt to answer. dispatch() now
+//     passes `--permission-mode bypassPermissions` explicitly, deliberately over the blunter
+//     top-level `--dangerously-skip-permissions`, which is documented as "recommended only for
+//     sandboxes with no internet access" — a caveat this doesn't fit.
+//   - There IS a real `claude auth` subcommand group — `claude auth status --json` prints
+//     `{ loggedIn, authMethod, apiProvider, email, orgId, orgName, subscriptionType }`,
+//     confirmed against real output. This replaces the file-existence guessing this file used
+//     to do (a Linux/Windows credentials-file path, `null`/"unknown" on macOS because Keychain
+//     has no cheap file check) with one real, cross-platform, documented signal — checked live
+//     on macOS, presumed to work the same on Linux/Windows since it's the CLI's own command,
+//     not an OS-specific file path.
+//   - `claude auth login` also exists (`--claudeai` subscription flow is the default,
+//     `--console` for API-key billing — never use that one here, it defeats the entire point
+//     of this bridge). Its exact scriptability (does it print anything capturable? block for
+//     TTY input?) isn't tested yet, so triggerLogin() below still uses the already-verified
+//     `claude setup-token` rather than switching to it on assumption.
 //   - `--output-format stream-json` + `--include-partial-messages` exist for structured
 //     streaming — a real upgrade over the raw-text streaming dispatch() uses today, left for
-//     later since parsing its exact event shape needs its own real test, not bundled into
-//     this fix.
+//     later since parsing its exact event shape needs its own real test, not bundled here.
 import { spawn } from "node:child_process";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { readSavedClaudeToken, saveClaudeToken } from "../config.js";
-
-function credentialsPath() {
-  if (process.env.CLAUDE_CONFIG_DIR) return path.join(process.env.CLAUDE_CONFIG_DIR, ".credentials.json");
-  return path.join(os.homedir(), ".claude", ".credentials.json");
-}
 
 export async function checkInstalled() {
   return new Promise((resolve) => {
@@ -58,16 +46,23 @@ export async function checkInstalled() {
   });
 }
 
-// true | false | null (macOS — genuinely unknown without guessing at Keychain internals).
+// true | false | null (couldn't parse a clean answer — treated as "ask the user to confirm",
+// same convention as codex.js).
 export async function checkAuthenticated() {
   if (readSavedClaudeToken()) return true; // a token the bridge itself obtained via setup-token
-  if (os.platform() === "darwin") return null;
-  try {
-    const raw = fs.readFileSync(credentialsPath(), "utf8");
-    return Boolean(raw && JSON.parse(raw));
-  } catch {
-    return false;
-  }
+  return new Promise((resolve) => {
+    let out = "";
+    const child = spawn("claude", ["auth", "status", "--json"], { stdio: ["ignore", "pipe", "ignore"] });
+    child.stdout.on("data", (chunk) => { out += chunk; });
+    child.on("error", () => resolve(null)); // checkInstalled() separately covers "not on PATH"
+    child.on("exit", () => {
+      try {
+        resolve(Boolean(JSON.parse(out).loggedIn));
+      } catch {
+        resolve(null); // unexpected output shape from a CLI version this wasn't checked against
+      }
+    });
+  });
 }
 
 // Spawns `claude setup-token`, which — per the docs above — opens a browser for you to
