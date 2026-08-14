@@ -19,15 +19,26 @@
 //     set — so once you're logged in via the interactive CLI or VS Code extension, headless
 //     dispatch here needs nothing extra.
 //
-// ASSUMED, NOT YET VERIFIED against a real install — confirm with `claude --help` /
-// `claude -p --help` before trusting this in a real dispatch:
-//   - `-p`/`--print` is the correct one-shot headless flag (very likely — the docs describe
-//     "non-interactive mode (-p)" directly — but the exact combination with a task string as
-//     a positional/quoted argument hasn't been run here).
-//   - Plain stdout streaming (no `--output-format` flag) is what dispatch() below uses,
-//     deliberately avoiding a structured/streaming JSON flag whose exact name isn't verified
-//     for the *local* CLI (only the CI Action's own wrapper format is verified, and that's a
-//     different program).
+// VERIFIED against a real install (2026-08-14, `claude -p --help` pasted back from a real
+// machine, Claude Code CLI's own output):
+//   - `-p`/`--print` is real and works exactly as assumed.
+//   - `--permission-mode <mode>` accepts `acceptEdits | bypassPermissions | default | dontAsk
+//     | plan | auto`. Found the hard way, same as codex.js's sandbox bug: a first real
+//     dispatch ran cleanly and even reported "Finished" — but its own final message said it
+//     needed approval to create the file and hadn't gotten it, because headless dispatch has
+//     no one there to click "allow". dispatch() below now passes `--permission-mode
+//     bypassPermissions` explicitly. (There's also a blunter top-level
+//     `--dangerously-skip-permissions` flag, documented as "recommended only for sandboxes
+//     with no internet access" — deliberately not used here in favor of the permission-mode
+//     value that doesn't carry that caveat.)
+//   - There's a top-level `auth` subcommand ("Manage authentication") this file doesn't use
+//     yet — worth investigating as a possible fix for the macOS "authenticated: null" gap
+//     above (`claude auth status` or similar might give a cheap real signal instead of
+//     "unknown") — not yet tested, noted here rather than guessed at.
+//   - `--output-format stream-json` + `--include-partial-messages` exist for structured
+//     streaming — a real upgrade over the raw-text streaming dispatch() uses today, left for
+//     later since parsing its exact event shape needs its own real test, not bundled into
+//     this fix.
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -112,8 +123,14 @@ export function dispatch({ repoPath, task, onChunk }) {
     const env = savedToken ? { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: savedToken } : process.env;
     // Task text goes through as a single argv entry, never interpolated into a shell string —
     // spawn() with an argv array (no shell: true) makes that the default, not something we
-    // have to remember to do right.
-    const child = spawn("claude", ["-p", task], { cwd: repoPath, env, stdio: ["ignore", "pipe", "pipe"] });
+    // have to remember to do right. `--permission-mode bypassPermissions`: see the file-level
+    // comment above — without it, a headless run just stalls asking for approval it can never
+    // receive.
+    const child = spawn(
+      "claude",
+      ["-p", "--permission-mode", "bypassPermissions", task],
+      { cwd: repoPath, env, stdio: ["ignore", "pipe", "pipe"] }
+    );
     let out = "";
     child.stdout.on("data", (chunk) => {
       out += chunk.toString();
