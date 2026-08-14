@@ -179,7 +179,12 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
           await provider.dispatch({
             repoPath: body.repoPath,
             task,
-            onChunk: (text) => send({ type: "turn", text }),
+            // codex.js still passes plain text chunks; claude.js now passes structured
+            // { role, ... } turn events from ClaudeStreamParser (orchestrator text, or a
+            // subagent lane's start/progress/message/done) — normalize both into the same
+            // "turn" SSE event shape rather than forcing codex.js to match claude.js's shape
+            // for no functional reason.
+            onChunk: (chunk) => send(typeof chunk === "string" ? { type: "turn", role: "raw", text: chunk } : { type: "turn", ...chunk }),
           });
           // Real changed-file list, not just the CLI's own self-report — so what shows up in
           // FleetView is what git actually sees, including cases (like a repo-relative-path

@@ -37,6 +37,7 @@
 //     later since parsing its exact event shape needs its own real test, not bundled here.
 import { spawn } from "node:child_process";
 import { readSavedClaudeToken, saveClaudeToken } from "../config.js";
+import { ClaudeStreamParser } from "../claude-stream-parser.js";
 
 export async function checkInstalled() {
   return new Promise((resolve) => {
@@ -110,8 +111,12 @@ export function triggerLogin({ onStatus } = {}) {
   });
 }
 
-// Runs the task headlessly, streaming raw stdout/stderr chunks via onChunk as they arrive.
-// Resolves with the full combined output once the process exits; rejects on a non-zero exit.
+// Runs the task headlessly. Streams structured turn events via onChunk — orchestrator turns
+// and, when the CLAUDE.md Team Room protocol leads it to delegate, live subagent lanes
+// (start/progress/message/done) parsed from the CLI's own `--output-format stream-json`
+// output by ClaudeStreamParser (see that file for exactly what's verified vs. inferred).
+// `--verbose` is required alongside `--output-format stream-json` in `--print` mode — the CLI
+// itself errors without it, found by trying.
 export function dispatch({ repoPath, task, onChunk }) {
   return new Promise((resolve, reject) => {
     const savedToken = readSavedClaudeToken();
@@ -123,15 +128,24 @@ export function dispatch({ repoPath, task, onChunk }) {
     // receive.
     const child = spawn(
       "claude",
-      ["-p", "--permission-mode", "bypassPermissions", task],
+      ["-p", "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--include-partial-messages", "--verbose", task],
       { cwd: repoPath, env, stdio: ["ignore", "pipe", "pipe"] }
     );
+    const parser = new ClaudeStreamParser();
     let out = "";
+    let buffer = "";
     child.stdout.on("data", (chunk) => {
-      out += chunk.toString();
-      onChunk?.(chunk.toString());
+      const text = chunk.toString();
+      out += text;
+      buffer += text;
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || ""; // last line may be incomplete — keep it for the next chunk
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        for (const event of parser.feed(line)) onChunk?.(event);
+      }
     });
-    child.stderr.on("data", (chunk) => onChunk?.(chunk.toString()));
+    child.stderr.on("data", (chunk) => onChunk?.({ role: "raw", text: chunk.toString() }));
     child.on("error", reject);
     child.on("exit", (code) => {
       if (code !== 0) {
