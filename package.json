@@ -1,0 +1,16 @@
+{
+  "name": "fleetview-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local companion process for FleetView — relays between the FleetView web UI and an already-authenticated local claude/codex CLI. See docs/local-bridge-design.md at the repo root.",
+  "type": "module",
+  "bin": {
+    "fleetview-bridge": "./bin/fleetview-bridge.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node ./bin/fleetview-bridge.js"
+  }
+}
