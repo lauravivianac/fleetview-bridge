@@ -3,6 +3,7 @@
 // protocol, §4 login flow).
 import http from "node:http";
 import { generateToken, timingSafeEqual, isRepoAllowed, isOriginAllowed } from "./security.js";
+import { getChangedFiles } from "./git-status.js";
 import * as claude from "./providers/claude.js";
 import * as codex from "./providers/codex.js";
 
@@ -180,7 +181,17 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
             task,
             onChunk: (text) => send({ type: "turn", text }),
           });
-          send({ type: "done", summary: "Finished. Check the repo for what changed — this run doesn't open a pull request for you the way the cloud dispatch does; the prompt should ask the CLI to do that itself if you want one." });
+          // Real changed-file list, not just the CLI's own self-report — so what shows up in
+          // FleetView is what git actually sees, including cases (like a repo-relative-path
+          // mismatch) where the CLI claims success but the file landed somewhere unexpected.
+          const changedFiles = await getChangedFiles(body.repoPath);
+          send({
+            type: "done",
+            changedFiles,
+            summary: changedFiles.length
+              ? `Finished — ${changedFiles.length} file${changedFiles.length === 1 ? "" : "s"} changed (see below). This run doesn't open a pull request for you the way the cloud dispatch does; ask for one in the task if you want one.`
+              : "Finished — no files changed. This run doesn't open a pull request for you the way the cloud dispatch does; ask for one in the task if you want one.",
+          });
         } catch (err) {
           send({ type: "error", message: err.message });
         }
