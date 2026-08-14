@@ -4,6 +4,7 @@
 import http from "node:http";
 import { generateToken, timingSafeEqual, isRepoAllowed, isOriginAllowed } from "./security.js";
 import { getChangedFiles } from "./git-status.js";
+import { buildLocalPreviewHtml } from "./local-preview.js";
 import * as claude from "./providers/claude.js";
 import * as codex from "./providers/codex.js";
 
@@ -201,6 +202,30 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
           send({ type: "error", message: err.message });
         }
         res.end();
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/preview") {
+        // GET has no body to carry a token in — same header /dispatch already accepts as a
+        // fallback, plus a query-string fallback for the plain <img>/<iframe src> case (not
+        // used today, since the UI fetches this as text and renders via srcDoc, but keeps the
+        // route usable without JS too).
+        const token = req.headers["x-fleetview-token"] || url.searchParams.get("token");
+        if (!sessionToken || !timingSafeEqual(token, sessionToken)) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "Not paired." }));
+          return;
+        }
+        const repoPath = url.searchParams.get("repoPath");
+        const folder = url.searchParams.get("folder") || null;
+        if (!isRepoAllowed(repoPath, repos)) {
+          res.writeHead(403, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "That repo path isn't in this bridge's --repo allow-list." }));
+          return;
+        }
+        const built = await buildLocalPreviewHtml({ repoPath, folder });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(built ? { ok: true, available: true, ...built } : { ok: true, available: false }));
         return;
       }
 

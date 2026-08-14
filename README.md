@@ -39,6 +39,7 @@ src/security.js           token generation/verification, repo allow-list, CORS o
 src/config.js              CLI arg parsing, ~/.fleetview-bridge/ local state
 src/providers/claude.js   Claude Code CLI: installed/auth checks, login trigger, dispatch
 src/providers/codex.js    Codex CLI: same, for codex
+src/local-preview.js      GET /preview: finds+inlines a real index.html straight off disk
 ```
 
 No dependencies beyond Node's standard library — deliberately, to keep `npm install` out of
