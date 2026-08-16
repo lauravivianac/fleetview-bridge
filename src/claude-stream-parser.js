@@ -33,16 +33,22 @@ function summarizeToolUse(name, input) {
   return `→ ${name}`;
 }
 
-function extractText(content) {
-  const parts = [];
+// Returns both the human-readable text (unchanged) and the real tool names used this turn
+// (block.name straight from the CLI's own tool_use block, never parsed back out of the
+// "→ Bash: ..." label) — the latter is what bridge/src/trace-builder.js counts for a real
+// tool-call histogram instead of regexing rendered text.
+function extractTurn(content) {
+  const textParts = [];
+  const toolNames = [];
   for (const block of content || []) {
-    if (block.type === "text" && block.text?.trim()) parts.push(block.text.trim());
+    if (block.type === "text" && block.text?.trim()) textParts.push(block.text.trim());
     if (block.type === "tool_use") {
       const label = summarizeToolUse(block.name, block.input);
-      if (label) parts.push(label);
+      if (label) textParts.push(label);
+      if (block.name && block.name !== "Agent") toolNames.push(block.name); // Agent spawns are tracked via task_started instead
     }
   }
-  return parts.join("\n").trim();
+  return { text: textParts.join("\n").trim(), toolNames };
 }
 
 export class ClaudeStreamParser {
@@ -50,7 +56,12 @@ export class ClaudeStreamParser {
     this.activeSubagents = new Map(); // toolUseId -> { taskId, description }
   }
 
-  // Parses one JSONL line, returns an array of normalized turn events (usually 0 or 1).
+  // Parses one JSONL line, returns an array of normalized turn events (usually 0 or 1). Every
+  // emitted event carries a `timestamp` — the CLI's own stream-json output isn't confirmed to
+  // carry one itself (not seen in the one real transcript this was built against), so this
+  // stamps receipt time instead: feed() runs as each line arrives off the child process's
+  // stdout, so "when feed() ran" is a real, live-captured proxy for "when this happened," not a
+  // guess — good enough for bridge/src/trace-builder.js's per-step/per-subagent durations.
   feed(line) {
     let obj;
     try {
@@ -58,10 +69,11 @@ export class ClaudeStreamParser {
     } catch {
       return []; // a non-JSON or partial line — nothing to emit
     }
+    const timestamp = new Date().toISOString();
 
     if (obj.type === "system" && obj.subtype === "task_started") {
       this.activeSubagents.set(obj.tool_use_id, { taskId: obj.task_id, description: obj.description });
-      return [{ role: "subagent", toolUseId: obj.tool_use_id, subagentEvent: "start", description: obj.description }];
+      return [{ role: "subagent", toolUseId: obj.tool_use_id, subagentEvent: "start", description: obj.description, timestamp }];
     }
 
     if (obj.type === "system" && obj.subtype === "task_progress") {
@@ -71,16 +83,17 @@ export class ClaudeStreamParser {
         subagentEvent: "progress",
         description: this.activeSubagents.get(obj.tool_use_id)?.description,
         lastTool: obj.last_tool_name,
+        timestamp,
       }];
     }
 
     if (obj.type === "assistant" && obj.message) {
-      const text = extractText(obj.message.content);
+      const { text, toolNames } = extractTurn(obj.message.content);
       if (!text) return [];
       if (!obj.parent_tool_use_id) {
-        return [{ role: "orchestrator", text }];
+        return [{ role: "orchestrator", text, toolNames, timestamp }];
       }
-      return [{ role: "subagent", toolUseId: obj.parent_tool_use_id, subagentEvent: "message", text }];
+      return [{ role: "subagent", toolUseId: obj.parent_tool_use_id, subagentEvent: "message", text, toolNames, timestamp }];
     }
 
     // Inferred (see file header): a top-level tool_result whose id matches an active subagent
@@ -90,7 +103,7 @@ export class ClaudeStreamParser {
       for (const block of obj.message.content) {
         if (block.type === "tool_result" && this.activeSubagents.has(block.tool_use_id)) {
           this.activeSubagents.delete(block.tool_use_id);
-          done.push({ role: "subagent", toolUseId: block.tool_use_id, subagentEvent: "done" });
+          done.push({ role: "subagent", toolUseId: block.tool_use_id, subagentEvent: "done", timestamp });
         }
       }
       return done;

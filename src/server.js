@@ -5,6 +5,7 @@ import http from "node:http";
 import { generateToken, timingSafeEqual, isRepoAllowed, isOriginAllowed } from "./security.js";
 import { getChangedFiles } from "./git-status.js";
 import { buildLocalPreviewHtml } from "./local-preview.js";
+import { createTraceRecorder } from "./trace-builder.js";
 import * as claude from "./providers/claude.js";
 import * as codex from "./providers/codex.js";
 
@@ -174,6 +175,7 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
           Connection: "keep-alive",
         });
         const send = (event) => res.write(`data: ${JSON.stringify(event)}\n\n`);
+        const trace = createTraceRecorder();
         send({ type: "status", text: `Starting ${body.provider}…` });
         log(`[dispatch:${body.provider}] ${body.repoPath}: ${task.slice(0, 80)}`);
         try {
@@ -184,8 +186,14 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
             // { role, ... } turn events from ClaudeStreamParser (orchestrator text, or a
             // subagent lane's start/progress/message/done) — normalize both into the same
             // "turn" SSE event shape rather than forcing codex.js to match claude.js's shape
-            // for no functional reason.
-            onChunk: (chunk) => send(typeof chunk === "string" ? { type: "turn", role: "raw", text: chunk } : { type: "turn", ...chunk }),
+            // for no functional reason. Every normalized event is also fed to the trace
+            // recorder, which turns it into the compact summary attached to `done`/`error`
+            // below — the same events, just not thrown away once rendered.
+            onChunk: (chunk) => {
+              const normalized = typeof chunk === "string" ? { role: "raw", text: chunk } : chunk;
+              trace.record(normalized);
+              send({ type: "turn", ...normalized });
+            },
           });
           // Real changed-file list, not just the CLI's own self-report — so what shows up in
           // FleetView is what git actually sees, including cases (like a repo-relative-path
@@ -197,9 +205,10 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
             summary: changedFiles.length
               ? `Finished — ${changedFiles.length} file${changedFiles.length === 1 ? "" : "s"} changed (see below). This run doesn't open a pull request for you the way the cloud dispatch does; ask for one in the task if you want one.`
               : "Finished — no files changed. This run doesn't open a pull request for you the way the cloud dispatch does; ask for one in the task if you want one.",
+            trace: trace.summarize(),
           });
         } catch (err) {
-          send({ type: "error", message: err.message });
+          send({ type: "error", message: err.message, trace: trace.summarize() });
         }
         res.end();
         return;
