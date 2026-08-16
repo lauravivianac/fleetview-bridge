@@ -20,6 +20,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { CodexStreamParser } from "../codex-stream-parser.js";
 
 function authFilePath() {
   const home = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
@@ -79,6 +80,12 @@ export function triggerLogin({ onStatus } = {}) {
   });
 }
 
+// `--json` (alias `--experimental-json`): structured JSONL streaming, real per Codex's own
+// source (see bridge/src/codex-stream-parser.js's header for exactly what's confirmed vs.
+// still assumed) — same upgrade `--output-format stream-json` was for claude.js. Composing it
+// with the already-live-verified `-s workspace-write` isn't itself confirmed on a real
+// machine yet; flagged here rather than assumed silently, same honesty bar as the rest of
+// this file.
 export function dispatch({ repoPath, task, onChunk }) {
   return new Promise((resolve, reject) => {
     // VERIFIED against a real install (`codex exec --help`, 2026-08-14): `codex exec`
@@ -88,13 +95,26 @@ export function dispatch({ repoPath, task, onChunk }) {
     // one level short of `danger-full-access` — the argv array (not a shell string) keeps
     // task text from ever being interpolated into anything a shell parses, same discipline
     // as claude.js and the cloud workflow YAML.
-    const child = spawn("codex", ["exec", "-s", "workspace-write", task], { cwd: repoPath, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(
+      "codex",
+      ["exec", "-s", "workspace-write", "--json", task],
+      { cwd: repoPath, stdio: ["ignore", "pipe", "pipe"] }
+    );
+    const parser = new CodexStreamParser();
     let out = "";
+    let buffer = "";
     child.stdout.on("data", (chunk) => {
-      out += chunk.toString();
-      onChunk?.(chunk.toString());
+      const text = chunk.toString();
+      out += text;
+      buffer += text;
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || ""; // last line may be incomplete — keep it for the next chunk
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        for (const event of parser.feed(line)) onChunk?.(event);
+      }
     });
-    child.stderr.on("data", (chunk) => onChunk?.(chunk.toString()));
+    child.stderr.on("data", (chunk) => onChunk?.({ role: "raw", text: chunk.toString() }));
     child.on("error", reject);
     child.on("exit", (code) => {
       if (code !== 0) {
