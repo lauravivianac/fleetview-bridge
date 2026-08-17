@@ -7,18 +7,25 @@ import { getChangedFiles } from "./git-status.js";
 import { buildLocalPreviewHtml } from "./local-preview.js";
 import { createTraceRecorder } from "./trace-builder.js";
 import { checkGhInstalled, checkGhAuthenticated } from "./gh-status.js";
+import { saveAttachments } from "./attachments.js";
 import * as claude from "./providers/claude.js";
 import * as codex from "./providers/codex.js";
 
 const PROVIDERS = { claude, codex };
 const VERSION = "0.1.0";
 
+// 28MB covers /dispatch's attachments (base64 inflates ~4/3, so attachments.js's own
+// MAX_TOTAL_BYTES of 18MB decoded needs ~24MB of encoded JSON, plus headroom for the rest of
+// the body) — every other endpoint's payload is tiny by comparison, so raising this doesn't
+// meaningfully change their risk profile.
+const MAX_BODY_BYTES = 28_000_000;
+
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     let body = "";
     req.on("data", (chunk) => {
       body += chunk;
-      if (body.length > 1_000_000) req.destroy(); // refuse to buffer an unreasonably large body
+      if (body.length > MAX_BODY_BYTES) req.destroy(); // refuse to buffer an unreasonably large body
     });
     req.on("end", () => {
       if (!body) return resolve({});
@@ -179,6 +186,22 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
           return;
         }
 
+        // Attachments get saved to disk (and appended to the task as a text note pointing at
+        // them) before dispatch even starts — a rejection here (too large, too many, bad data)
+        // fails the whole request rather than silently dispatching without what the user
+        // actually attached.
+        let finalTask = task;
+        if (body?.attachments?.length) {
+          try {
+            const { taskAddendum } = await saveAttachments(body.repoPath, body.attachments);
+            if (taskAddendum) finalTask = `${task}\n\n---\n\n${taskAddendum}`;
+          } catch (err) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, error: err.message }));
+            return;
+          }
+        }
+
         res.writeHead(200, {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-cache",
@@ -191,7 +214,7 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
         try {
           await provider.dispatch({
             repoPath: body.repoPath,
-            task,
+            task: finalTask,
             // codex.js still passes plain text chunks; claude.js now passes structured
             // { role, ... } turn events from ClaudeStreamParser (orchestrator text, or a
             // subagent lane's start/progress/message/done) — normalize both into the same
