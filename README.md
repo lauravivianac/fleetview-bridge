@@ -15,8 +15,16 @@ trusting this against your real subscription.
 ## Run it
 
 ```bash
-node bin/fleetview-bridge.js --repo /path/to/your/repo
+npx fleetview-bridge --repo /path/to/your/repo
 ```
+
+No install step, no cloning — `npx` fetches the latest published version and runs it directly
+(FleetView's own Installation screen generates this exact command for you, already pointed at
+your connected repo). Prefer a real local install instead? `npm install -g fleetview-bridge`
+also works, then just run `fleetview-bridge --repo /path/to/your/repo`.
+
+Working from a clone of this repo instead (e.g. to make a code change)? Same entry point, run
+directly: `node bin/fleetview-bridge.js --repo /path/to/your/repo`.
 
 It prints a 6-digit pairing code — paste it into FleetView → Installation → Local agent
 (optional). The bridge binds to `127.0.0.1` only and is never reachable from the network.
@@ -47,5 +55,6 @@ src/trace-builder.js           Turns either parser's events into a compact agent
 src/git-status.js              Real git status/diff info surfaced to the FleetView UI
 ```
 
-No dependencies beyond Node's standard library — deliberately, to keep `npm install` out of
-the loop between cloning this and running it.
+No dependencies beyond Node's standard library — deliberately, so `npx fleetview-bridge` has
+nothing to install beyond the package itself, and so a local clone never needs its own
+`npm install` step either.

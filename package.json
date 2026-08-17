@@ -1,16 +1,37 @@
 {
   "name": "fleetview-bridge",
   "version": "0.1.0",
-  "private": true,
-  "description": "Local companion process for FleetView — relays between the FleetView web UI and an already-authenticated local claude/codex CLI. See docs/local-bridge-design.md at the repo root.",
+  "description": "Local companion process for FleetView — relays between the FleetView web UI and an already-authenticated local claude/codex CLI. See docs/local-bridge-design.md in the main FleetView repo.",
   "type": "module",
   "bin": {
     "fleetview-bridge": "./bin/fleetview-bridge.js"
   },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=18"
   },
   "scripts": {
     "start": "node ./bin/fleetview-bridge.js"
-  }
+  },
+  "keywords": [
+    "fleetview",
+    "claude-code",
+    "codex",
+    "local-agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lauravivianac/fleetview-bridge.git"
+  },
+  "homepage": "https://github.com/lauravivianac/fleetview-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/lauravivianac/fleetview-bridge/issues"
+  },
+  "license": "MIT",
+  "author": ""
 }
