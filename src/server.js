@@ -6,6 +6,7 @@ import { generateToken, timingSafeEqual, isRepoAllowed, isOriginAllowed } from "
 import { getChangedFiles } from "./git-status.js";
 import { buildLocalPreviewHtml } from "./local-preview.js";
 import { createTraceRecorder } from "./trace-builder.js";
+import { checkGhInstalled, checkGhAuthenticated } from "./gh-status.js";
 import * as claude from "./providers/claude.js";
 import * as codex from "./providers/codex.js";
 
@@ -37,6 +38,7 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
   let pairingCode = null;
   let sessionToken = null;
   let providerStatusCache = {}; // refreshed on every /health call, not cached across calls
+  let ghStatusCache = { installed: false, authenticated: false }; // same, refreshed every call
 
   function setPairingCode(code) {
     pairingCode = code;
@@ -56,6 +58,13 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
       codex: { installed: codexInstalled, authenticated: codexAuth },
     };
     return providerStatusCache;
+  }
+
+  async function refreshGhStatus() {
+    const installed = await checkGhInstalled();
+    const authenticated = installed ? await checkGhAuthenticated() : false;
+    ghStatusCache = { installed, authenticated };
+    return ghStatusCache;
   }
 
   function requireToken(req, body) {
@@ -92,7 +101,7 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
 
     try {
       if (req.method === "GET" && url.pathname === "/health") {
-        const providers = await refreshProviderStatus();
+        const [providers, gh] = await Promise.all([refreshProviderStatus(), refreshGhStatus()]);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
           ok: true,
@@ -100,6 +109,7 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
           paired: Boolean(sessionToken),
           pairedRepos: repos,
           providers,
+          gh,
         }));
         return;
       }
