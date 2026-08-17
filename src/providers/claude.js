@@ -134,6 +134,7 @@ export function dispatch({ repoPath, task, onChunk }) {
     const parser = new ClaudeStreamParser();
     let out = "";
     let buffer = "";
+    let stderrOut = "";
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString();
       out += text;
@@ -145,11 +146,17 @@ export function dispatch({ repoPath, task, onChunk }) {
         for (const event of parser.feed(line)) onChunk?.(event);
       }
     });
-    child.stderr.on("data", (chunk) => onChunk?.({ role: "raw", text: chunk.toString() }));
+    // Same fix as codex.js's dispatch(): stderr used to be forwarded straight into onChunk as
+    // a fake spoken turn. Buffered instead — nothing shown while the run is healthy, real
+    // detail surfaces in the rejection's error message if claude actually exits non-zero.
+    child.stderr.on("data", (chunk) => {
+      stderrOut += chunk.toString();
+    });
     child.on("error", reject);
     child.on("exit", (code) => {
       if (code !== 0) {
-        reject(new Error(`claude exited with code ${code}`));
+        const detail = stderrOut.trim().slice(-500);
+        reject(new Error(`claude exited with code ${code}${detail ? `: ${detail}` : ""}`));
         return;
       }
       resolve(out);

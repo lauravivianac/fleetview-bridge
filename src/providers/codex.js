@@ -103,6 +103,7 @@ export function dispatch({ repoPath, task, onChunk }) {
     const parser = new CodexStreamParser();
     let out = "";
     let buffer = "";
+    let stderrOut = "";
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString();
       out += text;
@@ -114,11 +115,23 @@ export function dispatch({ repoPath, task, onChunk }) {
         for (const event of parser.feed(line)) onChunk?.(event);
       }
     });
-    child.stderr.on("data", (chunk) => onChunk?.({ role: "raw", text: chunk.toString() }));
+    // stderr used to be forwarded straight into onChunk as a fake spoken turn, same shape as a
+    // real agent_message — confirmed on a real dispatch, this is exactly where a codex CLI
+    // diagnostic line ("Reading additional input from stdin...") leaked into the chat window
+    // looking like a team member had said it, when nobody had. Buffered instead: nothing shown
+    // while the run is healthy. If codex actually exits non-zero, the real diagnostic detail
+    // goes into the rejection's error message below — where a crash reason is actually useful —
+    // instead of narrating every routine run's ordinary stderr chatter as if it were dialogue.
+    child.stderr.on("data", (chunk) => {
+      stderrOut += chunk.toString();
+    });
     child.on("error", reject);
     child.on("exit", (code) => {
       if (code !== 0) {
-        reject(new Error(`codex exited with code ${code}`));
+        // Tail, not the whole thing — a crash's real reason is usually the last few lines, not
+        // buried under startup noise that accumulated before it.
+        const detail = stderrOut.trim().slice(-500);
+        reject(new Error(`codex exited with code ${code}${detail ? `: ${detail}` : ""}`));
         return;
       }
       resolve(out);
