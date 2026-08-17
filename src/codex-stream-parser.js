@@ -42,7 +42,19 @@ function toolNameForItem(item) {
 }
 
 function summarizeItem(item) {
-  if (item.type === "agent_message" || item.type === "reasoning") return (item.text || "").trim();
+  // "reasoning" items used to be treated exactly like "agent_message" — the model's real,
+  // finished response — and shown as a spoken chat turn. They aren't the same thing: reasoning
+  // is Codex's internal chain-of-thought before it acts, the same category as Claude's own
+  // `thinking` content blocks or OpenAI's reasoning summaries — narration to itself, not a
+  // message to the user. In practice that narration frequently walks through raw shell/code it's
+  // about to run ("if [ -f config/project.yml ]; then printf...") — confirmed against a real
+  // screenshot from a real dispatch where exactly that kind of fragment leaked into the chat
+  // window as if it were something a team member said. Dropped entirely (same treatment as
+  // todo_list below) rather than shown or reworded — there's no reliable way to tell "reasoning
+  // that happens to restate something worth saying" from "reasoning that's just raw exploration"
+  // without guessing, and the actual spoken response still comes through via agent_message
+  // regardless of whether reasoning is shown.
+  if (item.type === "agent_message") return (item.text || "").trim();
   if (item.type === "command_execution") return `→ Bash: ${String(item.command || "").slice(0, 100)}`;
   if (item.type === "file_change") {
     const files = (item.changes || []).map((c) => c.path).filter(Boolean);
