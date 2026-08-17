@@ -22,11 +22,15 @@
 //     aggregated_output, exit_code, status}, "file_change" {changes, status}, "mcp_tool_call"
 //     {server, tool, arguments, result, error, status}, "web_search" {id, query, action},
 //     "todo_list" {items}. A "collab_tool_call" type also exists — thread-to-thread
-//     delegation, possibly Codex's own subagent-equivalent — but its field shape wasn't
-//     confirmed to the same bar as the others; it's treated as a generic tool call here, not
-//     given its own lane the way Claude's Agent/task_started gets one. Revisit once a real
-//     transcript confirms the shape, same as claude-stream-parser.js's own inferred-not-witnessed
-//     "subagent done" event was flagged for confirmation.
+//     delegation, confirmed to actually fire in practice (real dispatches show the
+//     orchestrator narrating "convocando a X como subagente independiente" right before one),
+//     but its exact field shape still isn't confirmed to the same bar as the others.
+//     summarizeCollabToolCall() below handles it defensively rather than assuming a shape —
+//     see that function for why. Used to get the same generic `→ ` tool-call treatment as
+//     mcp_tool_call, which the browser silently hides from the chat — that was the actual
+//     reason a real delegated role's work looked like it never happened. Revisit and tighten
+//     once a real transcript confirms the actual field, same as claude-stream-parser.js's own
+//     inferred-not-witnessed "subagent done" event was flagged for confirmation.
 //
 // STRUCTURALLY CONFIRMED, NOT LIVE-VERIFIED (Elena's terms). The first real Codex Local
 // dispatch run with --json should be checked against these assumptions before trusting them
@@ -39,6 +43,41 @@ function toolNameForItem(item) {
   if (item.type === "web_search") return "WebSearch";
   if (item.type === "collab_tool_call") return item.tool || "Collab";
   return null;
+}
+
+// collab_tool_call is Codex's own delegation mechanism — thread-to-thread, i.e. what the
+// CLAUDE.md protocol asks it to use as its `spawn_agent` tool for looping in another role.
+// Real evidence (two separate real dispatches) shows the orchestrator narrating "convocando a
+// Alex/Daniel como subagente independiente" and then... nothing — no separate turn for that
+// role ever appeared, because this item type used to get the same `→ ` prefix as an ordinary
+// tool call, which the browser (LocalAgentChat.js's stripToolCallLines) hides from the chat
+// entirely. Whatever the delegated role actually said or found was being thrown away, not just
+// summarized — the single biggest reason delegation looked like it wasn't happening.
+//
+// The field shape here is still NOT confirmed against a real transcript (same honesty bar as
+// the rest of this file) — codex-rs's source didn't give a confident answer, and there's no
+// codex binary in this sandbox to capture one. So this reads defensively: try every field name
+// a result might plausibly live under (guessing from mcp_tool_call's own confirmed shape,
+// since collab_tool_call is presumably siblings with it in the same Rust enum), and degrade to
+// a visible "still working" line rather than nothing or a raw `undefined` if none of them hit.
+// Revisit and tighten once a real transcript confirms the actual field.
+function summarizeCollabToolCall(item) {
+  const who = item.tool || "another role";
+  const resultText = [item.result, item.output, item.response, item.summary, item.text]
+    .find((v) => typeof v === "string" && v.trim());
+  // Real content from the delegated role: format it as `**Name:** message` — the exact same
+  // convention a role uses when it writes for itself (see lib/team-room.js in the main repo).
+  // That's deliberate, not decoration: it's what lets this flow through the browser's existing
+  // splitIntoRoleTurns() and land as a real, separately-avatared turn under Alex's own name —
+  // the actual fix for "Alex never shows as active" — instead of a one-off custom format only
+  // this code path understands. If `who` doesn't happen to match a real roster name, that
+  // existing parser already degrades safely (falls back to the Coordinator or an unattributed
+  // turn) — never worse than before, and correct whenever it does match.
+  if (resultText) return `**${who}:** ${resultText.trim()}`;
+  // No real content yet — nothing to attribute as speech, so this stays a plain status line
+  // (not the `**Name:**` format) rather than putting words in Alex's mouth he hasn't said.
+  if (item.status && item.status !== "completed") return `🤝 Delegating to ${who}… (${item.status})`;
+  return `🤝 Delegated to ${who} — no result text in this event (unconfirmed field shape; see codex-stream-parser.js).`;
 }
 
 function summarizeItem(item) {
@@ -62,7 +101,7 @@ function summarizeItem(item) {
   }
   if (item.type === "mcp_tool_call") return `→ ${item.tool || "MCP"}`;
   if (item.type === "web_search") return `→ WebSearch: ${String(item.query || "").slice(0, 100)}`;
-  if (item.type === "collab_tool_call") return `→ ${item.tool || "Collab"}`;
+  if (item.type === "collab_tool_call") return summarizeCollabToolCall(item);
   if (item.type === "error") return `Error: ${item.message || ""}`;
   return null; // todo_list and anything else unrecognized — bookkeeping, not a renderable turn
 }
