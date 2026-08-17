@@ -4,7 +4,7 @@
   "description": "Local companion process for FleetView — relays between the FleetView web UI and an already-authenticated local claude/codex CLI. See docs/local-bridge-design.md in the main FleetView repo.",
   "type": "module",
   "bin": {
-    "fleetview-bridge": "./bin/fleetview-bridge.js"
+    "fleetview-bridge": "bin/fleetview-bridge.js"
   },
   "files": [
     "bin",
