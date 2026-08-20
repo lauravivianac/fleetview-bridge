@@ -2,8 +2,18 @@
 // docs/local-bridge-design.md for the protocol this implements (§3 security model, §5
 // protocol, §4 login flow).
 import http from "node:http";
-import { generateToken, timingSafeEqual, isRepoAllowed, isOriginAllowed } from "./security.js";
-import { getChangedFiles } from "./git-status.js";
+import path from "node:path";
+import { createRequire } from "node:module";
+import {
+  generateToken,
+  timingSafeEqual,
+  isRepoAllowed,
+  isOriginAllowed,
+  isContainedIn,
+  PAIRING_CODE_TTL_MS,
+  PAIRING_MAX_ATTEMPTS,
+} from "./security.js";
+import { getChangedFiles, snapshotRepoState } from "./git-status.js";
 import { buildLocalPreviewHtml } from "./local-preview.js";
 import { createTraceRecorder } from "./trace-builder.js";
 import { checkGhInstalled, checkGhAuthenticated } from "./gh-status.js";
@@ -12,7 +22,11 @@ import * as claude from "./providers/claude.js";
 import * as codex from "./providers/codex.js";
 
 const PROVIDERS = { claude, codex };
-const VERSION = "0.1.0";
+// Read, not restated. This was a hardcoded "0.1.0" that /health reported while the package
+// itself said something else — and /health's version is what the console uses to tell a
+// developer whether their bridge is the fixed one. A version string that can lie about that
+// is worse than no version string.
+const VERSION = createRequire(import.meta.url)("../package.json").version;
 
 // 28MB covers /dispatch's attachments (base64 inflates ~4/3, so attachments.js's own
 // MAX_TOTAL_BYTES of 18MB decoded needs ~24MB of encoded JSON, plus headroom for the rest of
@@ -25,7 +39,12 @@ function readJsonBody(req) {
     let body = "";
     req.on("data", (chunk) => {
       body += chunk;
-      if (body.length > MAX_BODY_BYTES) req.destroy(); // refuse to buffer an unreasonably large body
+      if (body.length > MAX_BODY_BYTES) {
+        // Destroying the socket without settling the promise left the awaiting handler frame
+        // alive for the life of the process — a slow leak under repeated abuse.
+        req.destroy();
+        reject(new Error("Request body too large"));
+      }
     });
     req.on("end", () => {
       if (!body) return resolve({});
@@ -39,16 +58,22 @@ function readJsonBody(req) {
   });
 }
 
-export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
+export function createBridgeServer({ repos, allowedOrigin, allowLocalhost = false, log = () => {} }) {
   // Fresh pairing code + token every process start — see §3: re-pairing on restart is the
   // deliberately simple default, not a missing feature.
   let pairingCode = null;
+  let pairingCodeSetAt = 0;
+  let pairingAttempts = 0;
+  let pairingLockedOut = false;
   let sessionToken = null;
   let providerStatusCache = {}; // refreshed on every /health call, not cached across calls
   let ghStatusCache = { installed: false, authenticated: false }; // same, refreshed every call
 
   function setPairingCode(code) {
     pairingCode = code;
+    pairingCodeSetAt = Date.now();
+    pairingAttempts = 0;
+    pairingLockedOut = false;
   }
 
   async function refreshProviderStatus() {
@@ -61,8 +86,21 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
       codexInstalled ? codex.checkAuthenticated() : Promise.resolve(false),
     ]);
     providerStatusCache = {
-      claude: { installed: claudeInstalled, authenticated: claudeAuth },
-      codex: { installed: codexInstalled, authenticated: codexAuth },
+      // `billing` travels with each provider so the console can tell the developer the truth
+      // about what a local run costs them. Being logged in says nothing about HOW — a CLI that
+      // picks up an API key from the environment bills per token, and FleetView cannot see that
+      // spend at all, so claiming "$0 marginal cost" without checking is a guess presented as a
+      // fact. Names of env vars only; never their values.
+      claude: {
+        installed: claudeInstalled,
+        authenticated: claudeAuth,
+        billing: claudeInstalled ? claude.billingSignals() : null,
+      },
+      codex: {
+        installed: codexInstalled,
+        authenticated: codexAuth,
+        billing: codexInstalled ? codex.billingSignals() : null,
+      },
     };
     return providerStatusCache;
   }
@@ -74,6 +112,13 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
     return ghStatusCache;
   }
 
+  // Long opaque strings in provider output are almost always credentials. Redacting on shape
+  // rather than on a known prefix means a token format this was never tested against is still
+  // caught.
+  function redactSecrets(text) {
+    return String(text).replace(/[A-Za-z0-9_\-]{24,}/g, "<redacted>");
+  }
+
   function requireToken(req, body) {
     const token = body?.token || req.headers["x-fleetview-token"];
     return sessionToken && timingSafeEqual(token, sessionToken);
@@ -81,7 +126,7 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
 
   function applyCors(req, res) {
     const origin = req.headers.origin;
-    if (isOriginAllowed(origin, allowedOrigin)) {
+    if (isOriginAllowed(origin, allowedOrigin, { allowLocalhost })) {
       res.setHeader("Access-Control-Allow-Origin", origin);
       res.setHeader("Vary", "Origin");
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -108,24 +153,56 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
 
     try {
       if (req.method === "GET" && url.pathname === "/health") {
+        // Unauthenticated callers get liveness and nothing else. This used to hand anyone on an
+        // allowed origin the absolute paths of the developer's repos (which is exactly what a
+        // path attack needs), which CLIs and credentials exist on the machine, which API-key
+        // environment variables are set, and whether pairing had already happened — i.e.
+        // whether guessing the code was worth starting.
+        const paired = Boolean(sessionToken);
+        if (!requireToken(req, null)) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, version: VERSION, paired }));
+          return;
+        }
         const [providers, gh] = await Promise.all([refreshProviderStatus(), refreshGhStatus()]);
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({
-          ok: true,
-          version: VERSION,
-          paired: Boolean(sessionToken),
-          pairedRepos: repos,
-          providers,
-          gh,
-        }));
+        res.end(JSON.stringify({ ok: true, version: VERSION, paired, pairedRepos: repos, providers, gh }));
         return;
       }
 
       if (req.method === "POST" && url.pathname === "/pair") {
         const body = await readJsonBody(req);
+
+        // Pairing is the whole security model: whoever redeems this code can dispatch, and
+        // dispatch runs the agent CLI with permission prompts bypassed and this shell's entire
+        // environment inherited. A measured run against this server managed ~104 guesses per
+        // second over one connection, so an unthrottled code is guessed, not protected.
+        if (pairingLockedOut) {
+          res.writeHead(429, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            ok: false,
+            error: "Too many wrong pairing codes — restart the bridge to pair.",
+          }));
+          return;
+        }
+        if (pairingCode && Date.now() - pairingCodeSetAt > PAIRING_CODE_TTL_MS) {
+          pairingCode = null;
+          log("Pairing code expired unredeemed — restart the bridge to get a new one.");
+        }
         if (!pairingCode || !timingSafeEqual(body?.code, pairingCode)) {
+          pairingAttempts++;
+          if (pairingAttempts >= PAIRING_MAX_ATTEMPTS) {
+            pairingLockedOut = true;
+            pairingCode = null;
+            // Loud on purpose: repeated wrong codes against a loopback service are not a typo
+            // pattern, they are someone guessing.
+            log(
+              `PAIRING LOCKED OUT after ${pairingAttempts} wrong codes. If that was not you, a web ` +
+                "page you visited is trying to pair with this bridge. Restart to pair again."
+            );
+          }
           res.writeHead(401, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ ok: false, error: "Wrong or already-used pairing code." }));
+          res.end(JSON.stringify({ ok: false, error: "Wrong, expired, or already-used pairing code." }));
           return;
         }
         sessionToken = generateToken();
@@ -143,7 +220,9 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
           res.end(JSON.stringify({ ok: false, error: "Not paired." }));
           return;
         }
-        const provider = PROVIDERS[body?.provider];
+        // hasOwn, not a bare lookup: "constructor" and "__proto__" are truthy on a plain
+        // object and slipped past the guard into a TypeError further down.
+        const provider = Object.hasOwn(PROVIDERS, body?.provider) ? PROVIDERS[body.provider] : null;
         if (!provider) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: false, error: "Unknown provider." }));
@@ -155,7 +234,13 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
         // flip, per docs/local-bridge-design.md §4. Errors are logged locally rather than
         // returned, since the response already went out.
         provider
-          .triggerLogin({ onStatus: (text) => log(`[login:${body.provider}] ${text.trim()}`) })
+          .triggerLogin({
+            // `claude setup-token` prints the long-lived subscription token to stdout — that is
+            // how claude.js captures it. Logging every chunk verbatim wrote that token into the
+            // terminal, into scrollback, and into any file the bridge's output was redirected
+            // to. Anything token-shaped is redacted before it reaches the log.
+            onStatus: (text) => log(`[login:${body.provider}] ${redactSecrets(text).trim()}`),
+          })
           .then(() => log(`[login:${body.provider}] done.`))
           .catch((err) => log(`[login:${body.provider}] failed: ${err.message}`));
         return;
@@ -168,7 +253,9 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
           res.end(JSON.stringify({ ok: false, error: "Not paired." }));
           return;
         }
-        const provider = PROVIDERS[body?.provider];
+        // hasOwn, not a bare lookup: "constructor" and "__proto__" are truthy on a plain
+        // object and slipped past the guard into a TypeError further down.
+        const provider = Object.hasOwn(PROVIDERS, body?.provider) ? PROVIDERS[body.provider] : null;
         if (!provider) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: false, error: "Unknown provider." }));
@@ -211,10 +298,35 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
         const trace = createTraceRecorder();
         send({ type: "status", text: `Starting ${body.provider}…` });
         log(`[dispatch:${body.provider}] ${body.repoPath}: ${task.slice(0, 80)}`);
+        // What the repo looked like BEFORE the agent touched it. Without this, a repo that was
+        // already dirty had its pre-existing edits reported as the run's work.
+        const baseline = await snapshotRepoState(body.repoPath);
+
+        // Closing the browser tab used to leave the CLI running — still editing files, still
+        // spending — while the UI showed the round as failed. There was no stop at all.
+        let child = null;
+        let clientGone = false;
+        req.on("close", () => {
+          clientGone = true;
+          if (child && child.exitCode === null) {
+            log(`[dispatch:${body.provider}] client disconnected — stopping the run.`);
+            // SIGTERM first, then insist. An agent mid-write gets a chance to stop cleanly, not
+            // the option to ignore it.
+            child.kill("SIGTERM");
+            setTimeout(() => {
+              if (child && child.exitCode === null) child.kill("SIGKILL");
+            }, 5000);
+          }
+        });
+
         try {
           await provider.dispatch({
             repoPath: body.repoPath,
             task: finalTask,
+            onStarted: (spawned) => {
+              child = spawned;
+              if (clientGone) child.kill("SIGTERM"); // lost the race — client left first
+            },
             // codex.js still passes plain text chunks; claude.js now passes structured
             // { role, ... } turn events from ClaudeStreamParser (orchestrator text, or a
             // subagent lane's start/progress/message/done) — normalize both into the same
@@ -228,10 +340,11 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
               send({ type: "turn", ...normalized });
             },
           });
-          // Real changed-file list, not just the CLI's own self-report — so what shows up in
-          // FleetView is what git actually sees, including cases (like a repo-relative-path
-          // mismatch) where the CLI claims success but the file landed somewhere unexpected.
-          const changedFiles = await getChangedFiles(body.repoPath);
+          // Relative to the pre-run snapshot, so pre-existing dirty state is not credited to
+          // the agent. Note the honest limit: this is `git status` inside the repo, so a file
+          // the CLI wrote OUTSIDE the repo is invisible to it by construction. The comment that
+          // used to sit here claimed the opposite.
+          const changedFiles = await getChangedFiles(body.repoPath, baseline);
           send({
             type: "done",
             changedFiles,
@@ -248,11 +361,10 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
       }
 
       if (req.method === "GET" && url.pathname === "/preview") {
-        // GET has no body to carry a token in — same header /dispatch already accepts as a
-        // fallback, plus a query-string fallback for the plain <img>/<iframe src> case (not
-        // used today, since the UI fetches this as text and renders via srcDoc, but keeps the
-        // route usable without JS too).
-        const token = req.headers["x-fleetview-token"] || url.searchParams.get("token");
+        // Header only. A query-string fallback for a plain <img>/<iframe src> used to be
+        // accepted here; nothing in the UI used it, and a token in a URL ends up in shell
+        // history, proxy logs and Referer headers on the way out of any page holding it.
+        const token = req.headers["x-fleetview-token"];
         if (!sessionToken || !timingSafeEqual(token, sessionToken)) {
           res.writeHead(401, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: false, error: "Not paired." }));
@@ -263,6 +375,16 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
         if (!isRepoAllowed(repoPath, repos)) {
           res.writeHead(403, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: false, error: "That repo path isn't in this bridge's --repo allow-list." }));
+          return;
+        }
+        // repoPath was checked; `folder` never was, and it is joined straight onto it. A
+        // `folder=../secret` therefore read an index.html outside the repo entirely, defeating
+        // the allow-list the line above just enforced. Rejected rather than quietly clamped, so
+        // an attempt is visible instead of looking like an empty preview.
+        if (folder && !isContainedIn(path.join(repoPath, folder), repoPath)) {
+          log(`Rejected /preview folder escaping the repo: ${folder}`);
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "folder must stay inside the repo." }));
           return;
         }
         const built = await buildLocalPreviewHtml({ repoPath, folder });

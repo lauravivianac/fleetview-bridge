@@ -18,8 +18,8 @@ try {
   process.exit(1);
 }
 
-const { repos, port, allowedOrigin } = args;
-const { server, setPairingCode } = createBridgeServer({ repos, allowedOrigin, log });
+const { repos, port, allowedOrigin, allowLocalhost } = args;
+const { server, setPairingCode } = createBridgeServer({ repos, allowedOrigin, allowLocalhost, log });
 
 server.listen(port, "127.0.0.1", () => {
   const code = generatePairingCode();
@@ -28,10 +28,12 @@ server.listen(port, "127.0.0.1", () => {
   console.log("  FleetView Bridge — listening on 127.0.0.1 only, not reachable from the network");
   console.log("");
   console.log(`  Repos allowed:  ${repos.join(", ")}`);
+  console.log(`  Origin allowed: ${allowedOrigin || "http://localhost:<any port>  (--allow-localhost-origins)"}`);
   console.log(`  Pairing code:   ${code}`);
   console.log("");
   console.log("  In FleetView → Installation → Local agent, paste the code above.");
-  console.log("  This code is one-time and only works while this process keeps running.");
+  console.log("  This code is one-time, expires in 5 minutes, and locks pairing out after 5");
+  console.log("  wrong attempts — restart this process to get a new one.");
   console.log("");
 });
 

@@ -66,6 +66,31 @@ export async function checkAuthenticated() {
   });
 }
 
+// How this machine would be BILLED for a run, reported as facts rather than a verdict.
+//
+// Why it matters: FleetView tells the developer local dispatch is "$0 marginal cost, your
+// subscription". That is true when the CLI runs on subscription credentials — and false when it
+// picks up an API key from the environment, which for this audience is a common thing to have
+// exported. Then every local round is metered against that key, and nothing in FleetView can
+// see or price it, because Token usage only reads GitHub workflow logs.
+//
+// Precedence between a bridge-held OAuth token, ambient credentials, and an env API key is NOT
+// asserted here. dispatch() below sets CLAUDE_CODE_OAUTH_TOKEN when the bridge holds one, so
+// that case is known; beyond it, this reports what is present and lets the UI say the honest
+// thing rather than inventing a ranking that was never tested.
+export function billingSignals() {
+  const apiKeyVars = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"].filter(
+    (name) => Boolean(process.env[name])
+  );
+  return {
+    // The bridge's own subscription-bound token, which dispatch() forces on. When this is set,
+    // the run is on the subscription regardless of what else is in the environment.
+    bridgeToken: Boolean(readSavedClaudeToken()),
+    // Names only — never the values, which are secrets and would end up in a browser payload.
+    apiKeyEnvVars: apiKeyVars,
+  };
+}
+
 // Spawns `claude setup-token`, which — per the docs above — opens a browser for you to
 // approve, then prints a long-lived subscription-bound token to stdout once you do. We
 // capture that token and save it (bridge/src/config.js) rather than relying on the ambient
@@ -117,20 +142,29 @@ export function triggerLogin({ onStatus } = {}) {
 // output by ClaudeStreamParser (see that file for exactly what's verified vs. inferred).
 // `--verbose` is required alongside `--output-format stream-json` in `--print` mode — the CLI
 // itself errors without it, found by trying.
-export function dispatch({ repoPath, task, onChunk }) {
+// `onStarted` hands the spawned child back to the caller so a run can actually be stopped.
+// Without it, closing the browser tab left the CLI running: still editing files, still spending,
+// with the UI showing the round as failed and no way to stop it short of finding the process by
+// hand.
+export function dispatch({ repoPath, task, onChunk, onStarted }) {
   return new Promise((resolve, reject) => {
     const savedToken = readSavedClaudeToken();
     const env = savedToken ? { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: savedToken } : process.env;
     // Task text goes through as a single argv entry, never interpolated into a shell string —
     // spawn() with an argv array (no shell: true) makes that the default, not something we
-    // have to remember to do right. `--permission-mode bypassPermissions`: see the file-level
+    // have to remember to do right. The `--` before it is the second half of that: without an
+    // end-of-options marker a task that starts with a dash is parsed as a FLAG, and
+    // `--settings=<path>` on this CLI can point at a settings file with startup hooks. Not the
+    // main escalation — anyone who can dispatch already has bypassPermissions — but the layer
+    // that should still hold if the permission mode is ever tightened. `--permission-mode bypassPermissions`: see the file-level
     // comment above — without it, a headless run just stalls asking for approval it can never
     // receive.
     const child = spawn(
       "claude",
-      ["-p", "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--include-partial-messages", "--verbose", task],
+      ["-p", "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--", task],
       { cwd: repoPath, env, stdio: ["ignore", "pipe", "pipe"] }
     );
+    onStarted?.(child);
     const parser = new ClaudeStreamParser();
     let out = "";
     let buffer = "";
@@ -152,8 +186,24 @@ export function dispatch({ repoPath, task, onChunk }) {
     child.stderr.on("data", (chunk) => {
       stderrOut += chunk.toString();
     });
+    // The stream is split on newlines and the incomplete tail is kept in `buffer`. If the CLI
+    // exits without a trailing newline that tail is a whole, valid turn that never got parsed —
+    // and it is the LAST one, which is normally the summary or the verdict. It went missing from
+    // the chat, the trace and the GitHub comment with nothing indicating anything was lost.
+    function flushTail() {
+      const tail = buffer.trim();
+      buffer = "";
+      if (!tail) return;
+      try {
+        for (const event of parser.feed(tail)) onChunk?.(event);
+      } catch {
+        // Never let a last-gasp line stop the run from settling.
+      }
+    }
+
     child.on("error", reject);
     child.on("exit", (code) => {
+      flushTail();
       if (code !== 0) {
         const detail = stderrOut.trim().slice(-500);
         reject(new Error(`claude exited with code ${code}${detail ? `: ${detail}` : ""}`));
