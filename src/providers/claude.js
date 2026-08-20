@@ -148,12 +148,16 @@ export function dispatch({ repoPath, task, onChunk }) {
     const env = savedToken ? { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: savedToken } : process.env;
     // Task text goes through as a single argv entry, never interpolated into a shell string —
     // spawn() with an argv array (no shell: true) makes that the default, not something we
-    // have to remember to do right. `--permission-mode bypassPermissions`: see the file-level
+    // have to remember to do right. The `--` before it is the second half of that: without an
+    // end-of-options marker a task that starts with a dash is parsed as a FLAG, and
+    // `--settings=<path>` on this CLI can point at a settings file with startup hooks. Not the
+    // main escalation — anyone who can dispatch already has bypassPermissions — but the layer
+    // that should still hold if the permission mode is ever tightened. `--permission-mode bypassPermissions`: see the file-level
     // comment above — without it, a headless run just stalls asking for approval it can never
     // receive.
     const child = spawn(
       "claude",
-      ["-p", "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--include-partial-messages", "--verbose", task],
+      ["-p", "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--", task],
       { cwd: repoPath, env, stdio: ["ignore", "pipe", "pipe"] }
     );
     const parser = new ClaudeStreamParser();

@@ -115,7 +115,7 @@ export function dispatch({ repoPath, task, onChunk }) {
     // as claude.js and the cloud workflow YAML.
     const child = spawn(
       "codex",
-      ["exec", "-s", "workspace-write", "--json", task],
+      ["exec", "-s", "workspace-write", "--json", "--", task],
       { cwd: repoPath, stdio: ["ignore", "pipe", "pipe"] }
     );
     const parser = new CodexStreamParser();

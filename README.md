@@ -31,12 +31,14 @@ It prints a 6-digit pairing code — paste it into FleetView → Installation �
 
 ```
 Usage:
-  fleetview-bridge --repo <path> [--repo <path> ...] [--port 4700] [--origin https://your-fleetview.example.com]
+  fleetview-bridge --repo <path> [--repo <path> ...] --origin https://your-fleetview.example.com [--port 4700]
 
   --repo    Path to a git repo the bridge is allowed to dispatch into. Repeatable.
   --port    Local port to listen on (default 4700).
-  --origin  FleetView origin to allow via CORS. Defaults to localhost (any port) and
-            *.vercel.app — pass this if FleetView runs somewhere else.
+  --origin  FleetView origin allowed to talk to this bridge. REQUIRED, exact match, no
+            wildcards. Comma-separate for more than one.
+  --allow-localhost-origins
+            Trust http://localhost:<any port> instead, for developing FleetView itself.
 ```
 
 ## Layout
@@ -44,6 +46,30 @@ Usage:
 ```
 bin/fleetview-bridge.js        CLI entry point
 src/server.js                  HTTP + SSE server (pairing, health, login, dispatch)
+## Why --origin is required
+
+Anyone who can reach this bridge and redeem its pairing code can dispatch, and a dispatch runs
+the agent CLI with permission prompts bypassed, in your repo, inheriting your shell's entire
+environment — cloud keys, `gh` token, SSH agent. The repo allow-list is not a sandbox; an agent
+running with permissions bypassed can run anything.
+
+So the origin allow-list and the pairing code are the whole security model, and both were weaker
+than that job:
+
+- The default allow-list accepted any `*.vercel.app` subdomain. Those are free to register, so
+  any page an attacker deployed was a trusted origin — as was any `http://localhost:<port>`,
+  meaning any dev server or locally served HTML you happened to open. There is now no default:
+  you name your origin, or you pass `--allow-localhost-origins` deliberately.
+- The pairing code was six digits with no rate limit and no expiry. Measured against this
+  server, that is roughly 100 guesses per second over a single connection — the whole keyspace
+  in hours, far less from a browser making parallel requests. It is now eight characters from a
+  31-character alphabet (~41 bits), expires 5 minutes after it is printed, and locks pairing out
+  after 5 wrong attempts until you restart.
+
+A request with no `Origin` header is refused outright. That is what stops DNS rebinding, so
+don't relax it.
+
+
 src/security.js                token generation/verification, repo allow-list, CORS origin check
 src/config.js                  CLI arg parsing, ~/.fleetview-bridge/ local state
 src/providers/claude.js        Claude Code CLI: installed/auth checks, login trigger, dispatch
