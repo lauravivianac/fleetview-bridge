@@ -63,12 +63,28 @@ export class ClaudeStreamParser {
   // stdout, so "when feed() ran" is a real, live-captured proxy for "when this happened," not a
   // guess — good enough for bridge/src/trace-builder.js's per-step/per-subagent durations.
   feed(line) {
+    try {
+      return this.#feed(line);
+    } catch {
+      // Everything below this point runs on output from a CLI whose exact shape was observed
+      // once, from one version. A field arriving as a number where an array was expected, or a
+      // line that is literally `null`, used to throw out of here — and this is called from a
+      // stdout handler with no catch of its own, so the whole bridge process died mid-run,
+      // orphaning the CLI it had spawned and forcing a restart AND a re-pair. A shape change is
+      // the expected event for this parser, not an exotic one; dropping the line is the right
+      // response to it.
+      return [];
+    }
+  }
+
+  #feed(line) {
     let obj;
     try {
       obj = JSON.parse(line);
     } catch {
       return []; // a non-JSON or partial line — nothing to emit
     }
+    if (!obj || typeof obj !== "object") return []; // a bare `null`, a number, a string
     const timestamp = new Date().toISOString();
 
     if (obj.type === "system" && obj.subtype === "task_started") {

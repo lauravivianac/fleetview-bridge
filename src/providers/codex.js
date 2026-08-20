@@ -104,7 +104,11 @@ export function triggerLogin({ onStatus } = {}) {
 // with the already-live-verified `-s workspace-write` isn't itself confirmed on a real
 // machine yet; flagged here rather than assumed silently, same honesty bar as the rest of
 // this file.
-export function dispatch({ repoPath, task, onChunk }) {
+// `onStarted` hands the spawned child back to the caller so a run can actually be stopped.
+// Without it, closing the browser tab left the CLI running: still editing files, still spending,
+// with the UI showing the round as failed and no way to stop it short of finding the process by
+// hand.
+export function dispatch({ repoPath, task, onChunk, onStarted }) {
   return new Promise((resolve, reject) => {
     // VERIFIED against a real install (`codex exec --help`, 2026-08-14): `codex exec`
     // defaults to `sandbox: read-only` — confirmed the hard way, by a first real dispatch
@@ -118,6 +122,7 @@ export function dispatch({ repoPath, task, onChunk }) {
       ["exec", "-s", "workspace-write", "--json", "--", task],
       { cwd: repoPath, stdio: ["ignore", "pipe", "pipe"] }
     );
+    onStarted?.(child);
     const parser = new CodexStreamParser();
     let out = "";
     let buffer = "";
@@ -143,8 +148,24 @@ export function dispatch({ repoPath, task, onChunk }) {
     child.stderr.on("data", (chunk) => {
       stderrOut += chunk.toString();
     });
+    // The stream is split on newlines and the incomplete tail is kept in `buffer`. If the CLI
+    // exits without a trailing newline that tail is a whole, valid turn that never got parsed —
+    // and it is the LAST one, which is normally the summary or the verdict. It went missing from
+    // the chat, the trace and the GitHub comment with nothing indicating anything was lost.
+    function flushTail() {
+      const tail = buffer.trim();
+      buffer = "";
+      if (!tail) return;
+      try {
+        for (const event of parser.feed(tail)) onChunk?.(event);
+      } catch {
+        // Never let a last-gasp line stop the run from settling.
+      }
+    }
+
     child.on("error", reject);
     child.on("exit", (code) => {
+      flushTail();
       if (code !== 0) {
         // Tail, not the whole thing — a crash's real reason is usually the last few lines, not
         // buried under startup noise that accumulated before it.

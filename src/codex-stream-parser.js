@@ -109,12 +109,23 @@ function summarizeItem(item) {
 export class CodexStreamParser {
   // Parses one JSONL line, returns an array of normalized turn events (usually 0 or 1).
   feed(line) {
+    try {
+      return this.#feed(line);
+    } catch {
+      // See the same guard in claude-stream-parser.js: an unexpected shape used to kill the
+      // bridge process, not just the line.
+      return [];
+    }
+  }
+
+  #feed(line) {
     let obj;
     try {
       obj = JSON.parse(line);
     } catch {
       return []; // a non-JSON or partial line — nothing to emit
     }
+    if (!obj || typeof obj !== "object") return []; // a bare `null`, a number, a string
     const timestamp = new Date().toISOString();
 
     if (obj.type === "item.completed" && obj.item) {

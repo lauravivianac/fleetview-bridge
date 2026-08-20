@@ -12,7 +12,7 @@ import {
   PAIRING_CODE_TTL_MS,
   PAIRING_MAX_ATTEMPTS,
 } from "./security.js";
-import { getChangedFiles } from "./git-status.js";
+import { getChangedFiles, snapshotRepoState } from "./git-status.js";
 import { buildLocalPreviewHtml } from "./local-preview.js";
 import { createTraceRecorder } from "./trace-builder.js";
 import { checkGhInstalled, checkGhAuthenticated } from "./gh-status.js";
@@ -293,10 +293,35 @@ export function createBridgeServer({ repos, allowedOrigin, allowLocalhost = fals
         const trace = createTraceRecorder();
         send({ type: "status", text: `Starting ${body.provider}…` });
         log(`[dispatch:${body.provider}] ${body.repoPath}: ${task.slice(0, 80)}`);
+        // What the repo looked like BEFORE the agent touched it. Without this, a repo that was
+        // already dirty had its pre-existing edits reported as the run's work.
+        const baseline = await snapshotRepoState(body.repoPath);
+
+        // Closing the browser tab used to leave the CLI running — still editing files, still
+        // spending — while the UI showed the round as failed. There was no stop at all.
+        let child = null;
+        let clientGone = false;
+        req.on("close", () => {
+          clientGone = true;
+          if (child && child.exitCode === null) {
+            log(`[dispatch:${body.provider}] client disconnected — stopping the run.`);
+            // SIGTERM first, then insist. An agent mid-write gets a chance to stop cleanly, not
+            // the option to ignore it.
+            child.kill("SIGTERM");
+            setTimeout(() => {
+              if (child && child.exitCode === null) child.kill("SIGKILL");
+            }, 5000);
+          }
+        });
+
         try {
           await provider.dispatch({
             repoPath: body.repoPath,
             task: finalTask,
+            onStarted: (spawned) => {
+              child = spawned;
+              if (clientGone) child.kill("SIGTERM"); // lost the race — client left first
+            },
             // codex.js still passes plain text chunks; claude.js now passes structured
             // { role, ... } turn events from ClaudeStreamParser (orchestrator text, or a
             // subagent lane's start/progress/message/done) — normalize both into the same
@@ -310,10 +335,11 @@ export function createBridgeServer({ repos, allowedOrigin, allowLocalhost = fals
               send({ type: "turn", ...normalized });
             },
           });
-          // Real changed-file list, not just the CLI's own self-report — so what shows up in
-          // FleetView is what git actually sees, including cases (like a repo-relative-path
-          // mismatch) where the CLI claims success but the file landed somewhere unexpected.
-          const changedFiles = await getChangedFiles(body.repoPath);
+          // Relative to the pre-run snapshot, so pre-existing dirty state is not credited to
+          // the agent. Note the honest limit: this is `git status` inside the repo, so a file
+          // the CLI wrote OUTSIDE the repo is invisible to it by construction. The comment that
+          // used to sit here claimed the opposite.
+          const changedFiles = await getChangedFiles(body.repoPath, baseline);
           send({
             type: "done",
             changedFiles,
