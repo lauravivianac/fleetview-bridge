@@ -4,9 +4,15 @@
 name: CI
 
 on:
+  # main only on push. A branch with an open PR is already covered by pull_request, and
+  # listing both ran every commit twice.
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
