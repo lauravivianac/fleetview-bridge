@@ -17,7 +17,7 @@
   },
   "scripts": {
     "start": "node ./bin/fleetview-bridge.js",
-    "test": "node --test 'test/*.test.mjs'",
+    "test": "node --test test/*.test.mjs",
     "prepublishOnly": "npm test"
   },
   "keywords": [
