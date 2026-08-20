@@ -1,0 +1,54 @@
+# The repository had no CI at all. That is the reason the two problems this workflow guards
+# against were both possible: nothing ran the tests, and nothing stood between a working tree
+# and the npm registry.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The package declares engines.node >= 18, so it gets tested on the range it claims.
+        node: ["18", "20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm test
+
+  package-contents:
+    # Catches the other half of a bad release: a tarball missing a file the CLI needs at
+    # runtime, which no unit test would notice because the tests read from the working tree.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Pack and run the packed CLI, not the working tree
+        run: |
+          set -euo pipefail
+          npm pack --ignore-scripts
+          mkdir -p /tmp/packed && tar xzf fleetview-bridge-*.tgz -C /tmp/packed
+          cd /tmp/packed/package
+          # --help must work from the packed layout: it exercises the bin entrypoint and every
+          # import it pulls in, so a file left out of package.json "files" fails here.
+          node ./bin/fleetview-bridge.js --help
+      - name: The bridge must refuse to start without an explicit --origin
+        run: |
+          set -euo pipefail
+          if node ./bin/fleetview-bridge.js --repo . 2>/tmp/err; then
+            echo "FAIL: started with no --origin — the origin allow-list is not being enforced."
+            exit 1
+          fi
+          grep -q -- "--origin" /tmp/err || {
+            echo "FAIL: it refused, but not because of --origin:"; cat /tmp/err; exit 1;
+          }
+          echo "OK: refused to start without --origin."

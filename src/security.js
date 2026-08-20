@@ -46,8 +46,17 @@ export function generateToken() {
 }
 
 export function timingSafeEqual(a, b) {
-  const bufA = Buffer.from(String(a || ""));
-  const bufB = Buffer.from(String(b || ""));
+  // Empty is never a match. Without this, timingSafeEqual(undefined, undefined) compared two
+  // zero-length buffers and returned TRUE — so any call site that forgot to check the secret
+  // was set first would authenticate a caller who sent no credential at all. Every current
+  // call site does guard (`sessionToken && ...`, `!pairingCode || ...`), which is the only
+  // reason that was never live; relying on all future ones to remember is not a security
+  // model. Refusing empty here makes the guard belt-and-braces instead of load-bearing.
+  const strA = typeof a === "string" ? a : a == null ? "" : String(a);
+  const strB = typeof b === "string" ? b : b == null ? "" : String(b);
+  if (!strA || !strB) return false;
+  const bufA = Buffer.from(strA);
+  const bufB = Buffer.from(strB);
   if (bufA.length !== bufB.length) return false;
   return crypto.timingSafeEqual(bufA, bufB);
 }

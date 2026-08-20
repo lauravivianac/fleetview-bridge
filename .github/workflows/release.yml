@@ -1,0 +1,57 @@
+# The only supported way to publish this package.
+#
+# The previous release was published by hand from a laptop. It worked, but its registry record
+# points at a git commit that was never pushed, so nobody could verify from the outside that the
+# code users were running was the code in this repository — that had to be established after the
+# fact by downloading the tarball and diffing it. This workflow makes that check automatic and
+# public: --provenance signs the artifact against this repo, this commit and this workflow.
+#
+# It publishes only from a v* tag, and only if package.json agrees with the tag.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # required for npm provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: The tag and package.json must agree
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "FAIL: tag v$tag does not match package.json $pkg."
+            exit 1
+          fi
+          echo "OK: releasing $pkg."
+
+      - name: The tag must be on main
+        # A tag pushed from an unmerged branch would publish code that was never reviewed —
+        # which is the class of mistake this whole workflow exists to make impossible.
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "FAIL: $GITHUB_SHA is not an ancestor of origin/main. Merge before tagging."
+            exit 1
+          fi
+          echo "OK: tagged commit is on main."
+
+      - run: npm test
+
+      - name: Publish with provenance
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

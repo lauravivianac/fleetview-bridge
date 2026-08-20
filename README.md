@@ -15,19 +15,28 @@ trusting this against your real subscription.
 ## Run it
 
 ```bash
-npx fleetview-bridge --repo /path/to/your/repo
+npx fleetview-bridge --repo /path/to/your/repo --origin https://your-fleetview.example.com
 ```
+
+`--origin` is the address of *your* FleetView, and it is required — the bridge refuses to start
+without it. See [Why --origin is required](#why---origin-is-required) below; the short version is
+that anything allowed to talk to this process can run commands as you, so there is no safe
+default to fall back on.
 
 No install step, no cloning — `npx` fetches the latest published version and runs it directly
 (FleetView's own Installation screen generates this exact command for you, already pointed at
-your connected repo). Prefer a real local install instead? `npm install -g fleetview-bridge`
-also works, then just run `fleetview-bridge --repo /path/to/your/repo`.
+your connected repo and filled in with its own origin, so you can copy it rather than typing the
+URL). Prefer a real local install instead? `npm install -g fleetview-bridge` also works — but
+note that a global install does not update itself the way `npx` does, so you have to re-run
+`npm install -g fleetview-bridge` to pick up a security fix.
 
 Working from a clone of this repo instead (e.g. to make a code change)? Same entry point, run
-directly: `node bin/fleetview-bridge.js --repo /path/to/your/repo`.
+directly: `node bin/fleetview-bridge.js --repo /path/to/your/repo --allow-localhost-origins`.
 
-It prints a 6-digit pairing code — paste it into FleetView → Installation → Local agent
-(optional). The bridge binds to `127.0.0.1` only and is never reachable from the network.
+It prints an 8-character pairing code — paste it into FleetView → Installation → Local agent
+(optional). The code expires 5 minutes after it is printed, and pairing locks out after 5 wrong
+attempts, so if you miss the window just restart the bridge. It binds to `127.0.0.1` only and is
+never reachable from the network.
 
 ```
 Usage:

@@ -3,6 +3,7 @@
 // protocol, §4 login flow).
 import http from "node:http";
 import path from "node:path";
+import { createRequire } from "node:module";
 import {
   generateToken,
   timingSafeEqual,
@@ -21,7 +22,11 @@ import * as claude from "./providers/claude.js";
 import * as codex from "./providers/codex.js";
 
 const PROVIDERS = { claude, codex };
-const VERSION = "0.1.0";
+// Read, not restated. This was a hardcoded "0.1.0" that /health reported while the package
+// itself said something else — and /health's version is what the console uses to tell a
+// developer whether their bridge is the fixed one. A version string that can lie about that
+// is worse than no version string.
+const VERSION = createRequire(import.meta.url)("../package.json").version;
 
 // 28MB covers /dispatch's attachments (base64 inflates ~4/3, so attachments.js's own
 // MAX_TOTAL_BYTES of 18MB decoded needs ~24MB of encoded JSON, plus headroom for the rest of
