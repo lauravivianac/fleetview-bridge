@@ -66,6 +66,31 @@ export async function checkAuthenticated() {
   });
 }
 
+// How this machine would be BILLED for a run, reported as facts rather than a verdict.
+//
+// Why it matters: FleetView tells the developer local dispatch is "$0 marginal cost, your
+// subscription". That is true when the CLI runs on subscription credentials — and false when it
+// picks up an API key from the environment, which for this audience is a common thing to have
+// exported. Then every local round is metered against that key, and nothing in FleetView can
+// see or price it, because Token usage only reads GitHub workflow logs.
+//
+// Precedence between a bridge-held OAuth token, ambient credentials, and an env API key is NOT
+// asserted here. dispatch() below sets CLAUDE_CODE_OAUTH_TOKEN when the bridge holds one, so
+// that case is known; beyond it, this reports what is present and lets the UI say the honest
+// thing rather than inventing a ranking that was never tested.
+export function billingSignals() {
+  const apiKeyVars = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"].filter(
+    (name) => Boolean(process.env[name])
+  );
+  return {
+    // The bridge's own subscription-bound token, which dispatch() forces on. When this is set,
+    // the run is on the subscription regardless of what else is in the environment.
+    bridgeToken: Boolean(readSavedClaudeToken()),
+    // Names only — never the values, which are secrets and would end up in a browser payload.
+    apiKeyEnvVars: apiKeyVars,
+  };
+}
+
 // Spawns `claude setup-token`, which — per the docs above — opens a browser for you to
 // approve, then prints a long-lived subscription-bound token to stdout once you do. We
 // capture that token and save it (bridge/src/config.js) rather than relying on the ambient

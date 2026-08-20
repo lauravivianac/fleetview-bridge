@@ -61,8 +61,21 @@ export function createBridgeServer({ repos, allowedOrigin, log = () => {} }) {
       codexInstalled ? codex.checkAuthenticated() : Promise.resolve(false),
     ]);
     providerStatusCache = {
-      claude: { installed: claudeInstalled, authenticated: claudeAuth },
-      codex: { installed: codexInstalled, authenticated: codexAuth },
+      // `billing` travels with each provider so the console can tell the developer the truth
+      // about what a local run costs them. Being logged in says nothing about HOW — a CLI that
+      // picks up an API key from the environment bills per token, and FleetView cannot see that
+      // spend at all, so claiming "$0 marginal cost" without checking is a guess presented as a
+      // fact. Names of env vars only; never their values.
+      claude: {
+        installed: claudeInstalled,
+        authenticated: claudeAuth,
+        billing: claudeInstalled ? claude.billingSignals() : null,
+      },
+      codex: {
+        installed: codexInstalled,
+        authenticated: codexAuth,
+        billing: codexInstalled ? codex.billingSignals() : null,
+      },
     };
     return providerStatusCache;
   }

@@ -51,6 +51,24 @@ export async function checkAuthenticated() {
   });
 }
 
+// See the same function in claude.js for why this exists. Codex has no bridge-held token, so
+// the only signals are the auth file and whether an API key is sitting in the environment that
+// dispatch() passes straight through.
+export function billingSignals() {
+  let authFile = false;
+  try {
+    authFile = Boolean(fs.readFileSync(authFilePath(), "utf8"));
+  } catch {
+    authFile = false;
+  }
+  return {
+    bridgeToken: false,
+    subscriptionAuthFile: authFile,
+    // Names only, never values.
+    apiKeyEnvVars: ["OPENAI_API_KEY"].filter((name) => Boolean(process.env[name])),
+  };
+}
+
 // Spawns `codex login`, which (per third-party docs, unverified first-party) defaults to a
 // ChatGPT OAuth browser flow and writes ~/.codex/auth.json on completion — no token to
 // capture from stdout the way Claude's setup-token has, so this just watches for the auth
