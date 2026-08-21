@@ -1,0 +1,79 @@
+# Marking published versions as deprecated, from a button instead of a laptop.
+#
+# `npm deprecate` is the only channel that reaches someone who installed globally or pinned a
+# version — `npx` users re-resolve `latest` on every run and are carried along automatically,
+# but those two populations are not, and after a security release they are exactly the people
+# still running the vulnerable code.
+#
+# It lives here rather than in the release workflow on purpose: deprecating is a judgement
+# about versions that are already out, sometimes made days later, and it should not be able to
+# fire as a side effect of shipping something new.
+name: Deprecate published versions
+
+on:
+  workflow_dispatch:
+    inputs:
+      range:
+        description: 'Version range to deprecate, e.g. "<0.2.0" or "0.1.1"'
+        required: true
+        default: "<0.2.0"
+      message:
+        description: "What users see on install. Say what is wrong and what to do about it."
+        required: true
+        default: "Contains a remote-code-execution chain. Upgrade: npm install -g fleetview-bridge@latest"
+      undo:
+        description: "Un-deprecate instead (clears the message on that range)"
+        type: boolean
+        default: false
+
+jobs:
+  deprecate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Refuse to deprecate the version that is currently latest
+        # Deprecating `latest` tells every new installer that the version they are about to get
+        # is broken, which is the opposite of what a security release is for. The range is
+        # matched with npm's own semver so "<0.2.0" and "0.1.x" are read the way npm reads them,
+        # not the way a string comparison would.
+        run: |
+          set -euo pipefail
+          latest="$(npm view fleetview-bridge dist-tags.latest)"
+          echo "latest is $latest"
+          node -e '
+            const semver = require("semver");
+            const [range, latest] = [process.argv[1], process.argv[2]];
+            if (semver.satisfies(latest, range)) {
+              console.error(`FAIL: range "${range}" matches ${latest}, which is the current latest.`);
+              process.exit(1);
+            }
+            console.log(`OK: "${range}" does not match ${latest}.`);
+          ' "${{ inputs.range }}" "$latest"
+
+      - name: Deprecate
+        if: ${{ !inputs.undo }}
+        run: npm deprecate "fleetview-bridge@${{ inputs.range }}" "${{ inputs.message }}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Un-deprecate
+        # An empty message is how npm clears a deprecation.
+        if: ${{ inputs.undo }}
+        run: npm deprecate "fleetview-bridge@${{ inputs.range }}" ""
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Read it back
+        # The command's own exit code says the request was accepted, not that the registry now
+        # says what we think it says. So we ask.
+        run: |
+          set -euo pipefail
+          echo "deprecated field per version:"
+          npm view fleetview-bridge --json \
+            | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));
+                       for (const v of d.versions) console.log(" ", v);' || true
+          npm view "fleetview-bridge@${{ inputs.range }}" deprecated || echo "(none reported)"
