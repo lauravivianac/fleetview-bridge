@@ -37,22 +37,32 @@ jobs:
 
       - name: Refuse to deprecate the version that is currently latest
         # Deprecating `latest` tells every new installer that the version they are about to get
-        # is broken, which is the opposite of what a security release is for. The range is
-        # matched with npm's own semver so "<0.2.0" and "0.1.x" are read the way npm reads them,
-        # not the way a string comparison would.
+        # is broken, which is the opposite of what a security release is for.
+        #
+        # The range is resolved by npm itself rather than compared as a string: `npm view
+        # pkg@<range> version --json` returns exactly the published versions that match, using
+        # the same semver npm uses when someone installs. An earlier version of this step
+        # required("semver") in a bare `node -e`, which does not resolve on a runner with no
+        # install step — hence no dependency here at all.
         run: |
           set -euo pipefail
           latest="$(npm view fleetview-bridge dist-tags.latest)"
           echo "latest is $latest"
-          node -e '
-            const semver = require("semver");
-            const [range, latest] = [process.argv[1], process.argv[2]];
-            if (semver.satisfies(latest, range)) {
-              console.error(`FAIL: range "${range}" matches ${latest}, which is the current latest.`);
+          matched="$(npm view "fleetview-bridge@${{ inputs.range }}" version --json 2>/dev/null || echo '[]')"
+          echo "range matches: $matched"
+          MATCHED="$matched" LATEST="$latest" RANGE='${{ inputs.range }}' node -e '
+            const raw = JSON.parse(process.env.MATCHED || "[]");
+            const versions = Array.isArray(raw) ? raw : [raw];
+            if (versions.length === 0) {
+              console.error(`FAIL: range "${process.env.RANGE}" matches no published version.`);
               process.exit(1);
             }
-            console.log(`OK: "${range}" does not match ${latest}.`);
-          ' "${{ inputs.range }}" "$latest"
+            if (versions.includes(process.env.LATEST)) {
+              console.error(`FAIL: range matches ${process.env.LATEST}, which is the current latest.`);
+              process.exit(1);
+            }
+            console.log(`OK: will act on ${versions.join(", ")}; latest ${process.env.LATEST} untouched.`);
+          '
 
       - name: Deprecate
         if: ${{ !inputs.undo }}
