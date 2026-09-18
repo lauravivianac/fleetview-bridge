@@ -7,17 +7,40 @@
 # public: --provenance signs the artifact against this repo, this commit and this workflow.
 #
 # It publishes only from a v* tag, and only if package.json agrees with the tag.
+#
+# ---- AND FROM A BUTTON, UNDER THE SAME GUARANTEES ----
+#
+# The tag push is the normal path and stays exactly as it was. The button exists because pushing a
+# tag needs a terminal with push rights, and a release should not wait on whoever happens to have
+# one open — a real case: the change was merged, package.json said 0.2.1, and the version sat
+# unpublished because the only person who could push the tag was not at a terminal.
+#
+# The button gives up NOTHING the tag path guarantees, and the steps below enforce each in turn:
+#
+#   reviewed code   it refuses to run from any ref but main
+#   a real version  it reads package.json, and refuses if that version is already on the registry
+#   a tag exists    it CREATES v<version> on the published commit, so the registry record still
+#                   points at a tag anybody can check out — the whole reason this file exists
+#   provenance      unchanged: --provenance signs the artifact against this repo and commit
+#
+# What it cannot do is publish something that is not on main, or republish a version, or publish a
+# version whose tag already points somewhere else. Those are the three ways a button like this
+# normally becomes a hole.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # write, and only for the dispatch path: the tag has to be created somewhere, and creating it
+      # here — on the exact commit being published — is stricter than trusting it was created right
+      # by hand. A tag pushed by GITHUB_TOKEN does not re-trigger this workflow, so there is no loop.
+      contents: write
       id-token: write # required for npm provenance
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +50,7 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       - name: The tag and package.json must agree
+        if: github.event_name == 'push'
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME#v}"
@@ -37,9 +61,57 @@ jobs:
           fi
           echo "OK: releasing $pkg."
 
+      # ---- the dispatch path's own three checks, which together replace the tag ----
+      - name: Only from main
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "FAIL: this button publishes from main only. It was run on $GITHUB_REF."
+            echo "Merge first — the point of the check is that what gets published was reviewed."
+            exit 1
+          fi
+          echo "OK: running on main."
+
+      - name: That version must not already be published
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          pkg="$(node -p "require('./package.json').version")"
+          # `npm view` exits non-zero when the version does not exist, which is the good case here.
+          if npm view "fleetview-bridge@$pkg" version >/dev/null 2>&1; then
+            echo "FAIL: fleetview-bridge@$pkg is already on the registry."
+            echo "Bump the version in package.json and merge that before pressing this again."
+            exit 1
+          fi
+          echo "OK: $pkg is not published yet."
+
+      - name: Tag this commit, or refuse if the tag points elsewhere
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          pkg="$(node -p "require('./package.json').version")"
+          existing="$(git ls-remote --tags origin "refs/tags/v$pkg" | cut -f1)"
+          if [ -n "$existing" ] && [ "$existing" != "$GITHUB_SHA" ]; then
+            # Publishing anyway would leave the registry pointing at one commit and the tag at
+            # another — exactly the unverifiable state this workflow was written to end.
+            echo "FAIL: v$pkg already exists and points at $existing, not $GITHUB_SHA."
+            exit 1
+          fi
+          if [ -z "$existing" ]; then
+            git tag -a "v$pkg" -m "$pkg" "$GITHUB_SHA"
+            git push origin "refs/tags/v$pkg"
+            echo "OK: tagged v$pkg on $GITHUB_SHA."
+          else
+            echo "OK: v$pkg already points at this commit."
+          fi
+
       - name: The tag must be on main
         # A tag pushed from an unmerged branch would publish code that was never reviewed —
-        # which is the class of mistake this whole workflow exists to make impossible.
+        # which is the class of mistake this whole workflow exists to make impossible. The
+        # dispatch path has already refused anything but main, so this is the push path's copy of
+        # the same rule rather than a second, weaker one.
+        if: github.event_name == 'push'
         run: |
           set -euo pipefail
           git fetch --no-tags origin main
