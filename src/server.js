@@ -297,7 +297,21 @@ export function createBridgeServer({ repos, allowedOrigin, allowLocalhost = fals
         const send = (event) => res.write(`data: ${JSON.stringify(event)}\n\n`);
         const trace = createTraceRecorder();
         send({ type: "status", text: `Starting ${body.provider}…` });
-        log(`[dispatch:${body.provider}] ${body.repoPath}: ${task.slice(0, 80)}`);
+        // THE TERMINAL SAYS WHAT THE BRIDGE DID, NOT WHAT THE PERSON TYPED.
+        //
+        // This printed the first 80 characters of the task, so every prompt anybody sent —
+        // "Quiero mejorar la gui de esta calculadora" — was echoed into a log that scrolls up
+        // the developer's screen and sits in whatever captured that terminal. Asked for in as
+        // many words: the console should carry the BRIDGE'S execution and nothing else, and the
+        // conversation belongs in the console's own screens, not written down again here.
+        //
+        // What is kept is what an operator watching this window actually needs: which CLI, which
+        // repository, and a short id to match the start against the end. The size stands in for
+        // the text — a 40-character task and a 9,000-character one are different situations, and
+        // one number says so without quoting a word of it.
+        const runId = Math.random().toString(36).slice(2, 8);
+        const startedAt = Date.now();
+        log(`[dispatch:${body.provider}] ${body.repoPath} — run ${runId}, ${finalTask.length} chars`);
         // What the repo looked like BEFORE the agent touched it. Without this, a repo that was
         // already dirty had its pre-existing edits reported as the run's work.
         const baseline = await snapshotRepoState(body.repoPath);
@@ -309,7 +323,7 @@ export function createBridgeServer({ repos, allowedOrigin, allowLocalhost = fals
         req.on("close", () => {
           clientGone = true;
           if (child && child.exitCode === null) {
-            log(`[dispatch:${body.provider}] client disconnected — stopping the run.`);
+            log(`[dispatch:${body.provider}] run ${runId} — client disconnected, stopping the run.`);
             // SIGTERM first, then insist. An agent mid-write gets a chance to stop cleanly, not
             // the option to ignore it.
             child.kill("SIGTERM");
@@ -345,6 +359,13 @@ export function createBridgeServer({ repos, allowedOrigin, allowLocalhost = fals
           // the CLI wrote OUTSIDE the repo is invisible to it by construction. The comment that
           // used to sit here claimed the opposite.
           const changedFiles = await getChangedFiles(body.repoPath, baseline);
+          // The outcome, which this window never reported: it printed a dispatch arriving and
+          // then nothing, so a run that had finished half an hour ago looked exactly like one
+          // still going. Counts and a duration — again, nothing anybody said.
+          log(
+            `[dispatch:${body.provider}] run ${runId} finished in ${Math.round((Date.now() - startedAt) / 1000)}s` +
+              `, ${changedFiles.length} file${changedFiles.length === 1 ? "" : "s"} changed`
+          );
           send({
             type: "done",
             changedFiles,
@@ -354,6 +375,13 @@ export function createBridgeServer({ repos, allowedOrigin, allowLocalhost = fals
             trace: trace.summarize(),
           });
         } catch (err) {
+          // A failure is the bridge's own execution and belongs here. err.message is the CLI's,
+          // not the person's — and redactSecrets is applied for the same reason the login path
+          // applies it.
+          log(
+            `[dispatch:${body.provider}] run ${runId} failed after ` +
+              `${Math.round((Date.now() - startedAt) / 1000)}s: ${redactSecrets(String(err.message || err)).slice(0, 200)}`
+          );
           send({ type: "error", message: err.message, trace: trace.summarize() });
         }
         res.end();
