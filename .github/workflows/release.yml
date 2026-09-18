@@ -90,6 +90,18 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: |
           set -euo pipefail
+          # AN ANNOTATED TAG NEEDS A TAGGER, and actions/checkout sets up auth but not identity.
+          # Without this, `git tag -a` dies with "unable to auto-detect email address" and exits
+          # 128 — which is exactly what Release #2 did, 16 seconds in, before the push, before the
+          # tests and before the publish. The guard failed CLOSED, which is why nothing was left
+          # half-done: no tag on the remote, npm still on 0.2.0.
+          #
+          # Reproduced in a scratch repository with no identity configured: `git tag -a` fails and
+          # a lightweight tag succeeds. The lightweight tag is the other way out of this and it is
+          # the wrong one — the message on the tag is what a person reads months later to know what
+          # that version was, and it costs two lines to keep.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           pkg="$(node -p "require('./package.json').version")"
           existing="$(git ls-remote --tags origin "refs/tags/v$pkg" | cut -f1)"
           if [ -n "$existing" ] && [ "$existing" != "$GITHUB_SHA" ]; then

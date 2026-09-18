@@ -36,6 +36,18 @@ test("the button cannot republish a version", () => {
   assert.match(config, /is already on the registry/);
 });
 
+test("the annotated tag has a tagger, or it exits 128 before anything happens", () => {
+  // Release #2 died here: actions/checkout sets up auth but not identity, and `git tag -a` needs
+  // a tagger. Reproduced in a scratch repository — annotated fails, lightweight succeeds. The
+  // lightweight tag is the other way out and is the wrong one: the message on the tag is what
+  // somebody reads months later to know what that version was.
+  assert.match(config, /git config user\.name "github-actions\[bot\]"/);
+  assert.match(config, /git config user\.email "41898282\+github-actions\[bot\]@users\.noreply\.github\.com"/);
+  // In the same step as the tag, and before it — a config set in another step does not survive.
+  const step = config.slice(config.indexOf("Tag this commit"), config.indexOf("- run: npm test"));
+  assert.ok(step.indexOf("git config user.email") < step.indexOf("git tag -a"), "identity is set after the tag is made");
+});
+
 test("the button leaves a tag on the exact commit it published", () => {
   // The whole reason this workflow exists: a registry record anybody can check out. A publish
   // with no tag would be the hand-published release again, with a nicer origin.
